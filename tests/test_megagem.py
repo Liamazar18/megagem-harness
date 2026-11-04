@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 from random import Random
 from unittest.mock import patch
 
+from bot_runner import BotRunner
 from constants import (
     CARDS_PER_PLAYER,
     COINS_PER_PLAYER,
@@ -23,7 +24,9 @@ from harness import (
     play_game,
     play_round,
 )
-from lib import AuctionCard, Deck, MissionCard, Player, ValueChart
+from lib import AuctionCard, Deck, MissionCard, ValueChart
+from player import Player
+from tests.fixture_bots import InvalidBidBot
 
 BLUE, GREEN, PURPLE, YELLOW, PINK = STANDARD_GEMS
 
@@ -114,10 +117,20 @@ class CardTests(unittest.TestCase):
 
 
 class GameTests(unittest.TestCase):
+    def setUp(self):
+        self.runners = [BotRunner(seed=i) for i in range(5)]
+        for runner in self.runners:
+            self.addCleanup(runner.close)
+
+    def make_game(self, count, **kwargs):
+        game = create_game(count, bots=self.runners[:count], **kwargs)
+        self.addCleanup(game.close)
+        return game
+
     def test_setup_keeps_information_out_of_scoring_collections(self):
         for count in (3, 4, 5):
             with self.subTest(players=count):
-                game = create_game(count, rng=Random(0))
+                game = self.make_game(count, rng=Random(0))
                 self.assertEqual(sum(game.value_display.values()), 0)
                 self.assertEqual(len(game.available_missions), 4)
                 self.assertEqual(len(game.auction_gems), 2)
@@ -143,7 +156,6 @@ class GameTests(unittest.TestCase):
         self.assertEqual(player.reveal_remaining_gems(), ())
         self.assertEqual(player.public_gem_hand, [BLUE, GREEN])
         self.assertFalse(player.gem_collection)
-        self.assertIsNone(player.reveal_gem())
 
     def test_tie_priority_starts_after_previous_winner_and_wraps(self):
         self.assertEqual(_select_winner([0, 4, 4], 1, Random(0)), 2)
@@ -155,7 +167,7 @@ class GameTests(unittest.TestCase):
             choose.assert_called_once_with([0, 1, 4])
 
     def test_all_zero_bids_rotate_and_finish(self):
-        game = create_game(3, rng=Random(0))
+        game = self.make_game(3, rng=Random(0))
         with patch.object(Player, "get_bid", return_value=0):
             while game.auction_gems:
                 previous = game.previous_winner_id
@@ -168,7 +180,7 @@ class GameTests(unittest.TestCase):
 
     def test_loan_funding_investment_return_and_last_single_gem(self):
         rng = Random(0)
-        players = [Player(i, 35, [], rng=rng) for i in range(3)]
+        players = [Player(i, 35, [], bot_type=self.runners[i]) for i in range(3)]
         cards = (
             AuctionCard(AuctionType.LOAN, 20),
             AuctionCard(AuctionType.INVEST, 5),
@@ -197,19 +209,14 @@ class GameTests(unittest.TestCase):
         self.assertEqual(finish_game(game).scores[0], -1)
 
     def test_unaffordable_bids_become_zero(self):
-        game = create_game(3, rng=Random(0))
-        game.auction_deck = Deck([AuctionCard(AuctionType.INVEST, 5)])
-        with (
-            patch.object(game.players[0], "get_bid", return_value=100),
-            patch.object(game.players[1], "get_bid", return_value=-1),
-            patch.object(game.players[2], "get_bid", return_value=1),
-        ):
+        with create_game(3, rng=Random(0), bots=[InvalidBidBot] * 3) as game:
+            game.auction_deck = Deck([AuctionCard(AuctionType.INVEST, 5)])
             play_round(game)
-        self.assertEqual(game.previous_winner_id, 2)
-        self.assertEqual([p.coins for p in game.players], [35, 35, 34])
+            self.assertEqual(game.previous_winner_id, 2)
+            self.assertEqual([p.coins for p in game.players], [35, 35, 34])
 
     def test_one_collection_can_claim_multiple_missions_without_replenishment(self):
-        game = create_game(3, rng=Random(0))
+        game = self.make_game(3, rng=Random(0))
         game.auction_gems = deque([BLUE, GREEN])
         game.gem_deck = Deck()
         game.auction_deck = Deck([AuctionCard(AuctionType.AUCTION, 2)])
@@ -228,7 +235,7 @@ class GameTests(unittest.TestCase):
         self.assertEqual(game.available_missions, [unavailable])
 
     def test_cannot_score_or_play_at_the_wrong_stage(self):
-        game = create_game(3, rng=Random(0))
+        game = self.make_game(3, rng=Random(0))
         with self.assertRaises(ValueError):
             finish_game(game)
         game.auction_deck = Deck()
@@ -239,8 +246,8 @@ class GameTests(unittest.TestCase):
             play_round(game)
 
     def test_reproducible_games_without_global_card_mutation(self):
-        first = play_game(3, rng=Random(17))
-        second = play_game(3, rng=Random(17))
+        first = play_game(3, rng=Random(17), bots=self.runners[:3])
+        second = play_game(3, rng=Random(17), bots=self.runners[:3])
         self.assertEqual(first.scores, second.scores)
         self.assertEqual(first.winner_ids, second.winner_ids)
         self.assertEqual(
@@ -253,7 +260,12 @@ class GameTests(unittest.TestCase):
             for count in (3, 4, 5):
                 for seed in range(20):
                     with self.subTest(chart=chart.name, players=count, seed=seed):
-                        result = play_game(count, value_chart=chart, rng=Random(seed))
+                        result = play_game(
+                            count,
+                            value_chart=chart,
+                            rng=Random(seed),
+                            bots=self.runners[:count],
+                        )
                         game = result.state
                         starting_cards = count * CARDS_PER_PLAYER[count]
                         acquired = Counter()

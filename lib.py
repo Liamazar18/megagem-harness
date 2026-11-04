@@ -1,15 +1,14 @@
-"""Card definitions, a typed deck, and mutable player state."""
+"""Immutable card definitions and a typed deck."""
 
-from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
-from random import Random
-from types import MappingProxyType
+from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from constants import STANDARD_GEMS, AuctionType, GemType, WildCardRequirement
+from immutable import FrozenMap
 
 
+# Represents an auction card
 @dataclass(frozen=True, slots=True)
 class AuctionCard:
     """Value is a gem count for treasure, or a coin amount for loans/investments."""
@@ -23,6 +22,9 @@ class AuctionCard:
         if self.type is AuctionType.AUCTION and self.value not in (1, 2):
             raise ValueError("A treasure auction must award one or two gems")
 
+    # The value of the card, in coins, at the end of the game
+    # Does not include the return of coins bid for an invest card, these are 
+    # tracked separately as a property of players
     @property
     def end_game_value(self) -> int:
         """Investment bonus or loan repayment, excluding invested bid coins."""
@@ -33,30 +35,40 @@ class AuctionCard:
         return 0
 
 
+# Represents a mission card
 @dataclass(frozen=True, slots=True)
 class MissionCard:
+    # Number of coins to be paid at the end of the game for completing the mission
     value: int
+    # Type and number of gems required to complete the mission
     gem_requirements: Mapping[GemType, int]
+    # If the mission requires wild-card gems, the condition attached to those wild-cards
     wild_card_requirement: WildCardRequirement | None = None
 
     def __post_init__(self) -> None:
-        # Copy before wrapping so callers cannot mutate a card through their input.
-        gem_requirements = dict(self.gem_requirements)
-        if self.value < 0 or any(count < 0 for count in gem_requirements.values()):
+        if self.value < 0 or any(count < 0 for count in self.gem_requirements.values()):
             raise ValueError(
                 "Mission value and gem requirement counts cannot be negative"
             )
-        object.__setattr__(self, "gem_requirements", MappingProxyType(gem_requirements))
+        
+        # Makes gem_requirements a FrozenMap, so that the number of gems required for each
+        # type cannot be modified and is not connected to the original mapping as a view (copied)
+        object.__setattr__(self, "gem_requirements", FrozenMap(self.gem_requirements))
 
+    # Utility to calculate if a collection of gems (counts) satisfies the requirements
+    # of this mission card, allowing it to be claimed
     def is_satisfied(self, collection: Mapping[GemType, int]) -> bool:
-        """Check acquired gems; initial hand cards never satisfy missions."""
+        # Check mission requirements for all the standard gems
+        # Left over gems may be used for wild-card requirements
         remaining = tuple(
             collection.get(gem, 0) - self.gem_requirements.get(gem, 0)
             for gem in STANDARD_GEMS
         )
+        # Reject the collection if there is a standard gem requirement it does not satisfy
         if any(count < 0 for count in remaining):
             return False
 
+        # Checks the wild-card requirement
         required = self.gem_requirements.get(GemType.WILD_CARD, 0)
         match self.wild_card_requirement:
             case None:
@@ -70,9 +82,12 @@ class MissionCard:
         raise ValueError(f"Unknown wildcard requirement: {self.wild_card_requirement}")
 
 
+# Generic card type (AuctionCard, MissionCard, GemType) to comprise a deck
 CardT = TypeVar("CardT")
 
 
+# Represents a deck of cards of generic type, so that it can be used to 
+# draw gem, auction, and mission cards
 class Deck(Generic[CardT]):
     """Owns its list of cards. Draws from the end; shuffle before constructing."""
 
@@ -82,16 +97,20 @@ class Deck(Generic[CardT]):
     def __len__(self) -> int:
         return len(self._cards)
 
-    # Does not implement a random draw. Deck must be shuffled for a random draw
+    # Does not implement a random draw. Cards list must be shuffled outside of
+    # the class for a random draw
     def draw(self) -> CardT | None:
         return self._cards.pop() if self._cards else None
 
-
+# Represents a value chart as a tuple coin values for gem counts 0-6 
 @dataclass(frozen=True, slots=True)
 class ValueChart:
+    # Corresponds to the single-letter, A-E name of the value chart
     name: str
     values: tuple[int, ...]
 
+    # Value chart can be instantiated in six-value form (the last value is
+    # for 5+ gems), or in seven-value form
     def __post_init__(self) -> None:
         values = tuple(self.values)
         if len(values) == 6:
@@ -101,45 +120,8 @@ class ValueChart:
             raise ValueError("A value chart needs values for counts 0–5 or 0–6")
         object.__setattr__(self, "values", values)
 
+    # Returns the value-per-gem based on the number of gems of the given type
     def get_value(self, num_gems: int) -> int:
         if not 0 <= num_gems < len(self.values):
             raise ValueError(f"Gem count must be between 0 and 6, got {num_gems}")
         return self.values[num_gems]
-
-
-@dataclass
-class Player:
-    id: int
-    coins: int
-    hidden_gem_hand: list[GemType]
-    rng: Random = field(default_factory=Random, repr=False, compare=False)
-    invested_coins: int = field(default=0, init=False)
-    auction_cards: list[AuctionCard] = field(default_factory=list, init=False)
-    mission_cards: list[MissionCard] = field(default_factory=list, init=False)
-    public_gem_hand: list[GemType] = field(default_factory=list, init=False)
-    gem_collection: Counter[GemType] = field(default_factory=Counter, init=False)
-
-    def __post_init__(self) -> None:
-        self.hidden_gem_hand = list(self.hidden_gem_hand)
-
-    def get_bid(self) -> int:
-        """Placeholder policy until players receive decision context."""
-        return self.rng.randrange(5)
-
-    def choose_hidden_gem(self) -> int:
-        """Return an index into this player's remaining hidden hand."""
-        return self.rng.randrange(len(self.hidden_gem_hand))
-
-    def reveal_gem(self) -> GemType | None:
-        if not self.hidden_gem_hand:
-            return None
-        index = self.choose_hidden_gem() % len(self.hidden_gem_hand)
-        gem = self.hidden_gem_hand.pop(index)
-        self.public_gem_hand.append(gem)
-        return gem
-
-    def reveal_remaining_gems(self) -> tuple[GemType, ...]:
-        revealed = tuple(self.hidden_gem_hand)
-        self.public_gem_hand.extend(revealed)
-        self.hidden_gem_hand.clear()
-        return revealed

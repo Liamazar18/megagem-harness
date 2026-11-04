@@ -5,8 +5,10 @@ from itertools import combinations
 from constants import STANDARD_GEMS, AuctionType, GemType, WildCardRequirement
 from lib import AuctionCard, MissionCard, ValueChart
 
+# 30 total, 5 gem types, 6 of each type
 GEM_CARDS = tuple(gem for gem in STANDARD_GEMS for _ in range(6))
 
+# Mission cards provided by Megagem, 30 total
 MISSION_CARDS = (
     MissionCard(5, {GemType.WILD_CARD: 2}, WildCardRequirement.SAME),
     MissionCard(10, {GemType.WILD_CARD: 3}, WildCardRequirement.SAME),
@@ -24,6 +26,7 @@ MISSION_CARDS = (
     *(MissionCard(5, {gem: 2}) for gem in STANDARD_GEMS),
 )
 
+# Auction cards provided by Megagem, mixture of gem auction, loan, and invest cards, 25 total
 AUCTION_CARDS = tuple(
     AuctionCard(auction_type, value)
     for auction_type, value, copies in (
@@ -37,6 +40,7 @@ AUCTION_CARDS = tuple(
     for _ in range(copies)
 )
 
+# Value charts provided by Megagem with identical names, 5 total
 VALUE_CHARTS = (
     ValueChart("A", (0, 4, 8, 12, 16, 20)),
     ValueChart("B", (20, 16, 12, 8, 4, 0)),
