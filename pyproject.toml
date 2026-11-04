@@ -8,8 +8,5 @@ select = ["E", "F", "I", "UP"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
-files = [
-    "constants.py", "lib.py", "decks.py", "harness.py", "immutable.py",
-    "bots.py", "bot_info.py", "bot_runner.py", "player.py", "custom_bots.py",
-    "bot_definitions",
-]
+mypy_path = "src"
+files = ["src", "experiments/sample_experiment.py"]

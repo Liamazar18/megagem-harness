@@ -3,9 +3,9 @@
 A standard-library-only simulator for 3–5 players, using Python 3.10 or newer.
 
 ```sh
-python3 harness.py 3 --seed 42 --bot-seed 7
-python3 harness.py 5 --chart C --bots custom_bots:SmallBidBot
-python3 harness.py 3 --bot-timeout none
+python3 src/harness.py 3 --seed 42 --bot-seed 7
+python3 src/harness.py 5 --chart C --bots custom_bots:SmallBidBot
+python3 src/harness.py 3 --bot-timeout none
 ```
 
 Without a player-count argument, the CLI asks for one. Chart A is the default.
@@ -16,18 +16,19 @@ it defaults to one second per callback.
 
 ## Writing a bot
 
-Put each custom bot implementation in the `bot_definitions/` package, then expose
-its class through `custom_bots.py`. Implementations can live in separate files:
+Put each custom bot implementation in the `src/bot_definitions/` package, then expose
+its class through `src/custom_bots.py`. Implementations can live in separate files:
 
 ```text
-bot_definitions/
-    __init__.py
-    small_bid_bot.py
-    my_bot.py
-custom_bots.py
+src/
+    bot_definitions/
+        __init__.py
+        small_bid_bot.py
+        my_bot.py
+    custom_bots.py
 ```
 
-For example, define your subclass in `bot_definitions/my_bot.py`:
+For example, define your subclass in `src/bot_definitions/my_bot.py`:
 
 ```python
 from collections.abc import Mapping
@@ -53,7 +54,7 @@ class MyBot(Bot):
         self.rounds_seen += 1
 ```
 
-Add its import and public name to `custom_bots.py` alongside the existing example:
+Add its import and public name to `src/custom_bots.py` alongside the existing example:
 
 ```python
 from bot_definitions.my_bot import MyBot
@@ -62,11 +63,11 @@ from bot_definitions.small_bid_bot import SmallBidBot
 __all__ = ["MyBot", "SmallBidBot"]
 ```
 
-Run it with `python3 harness.py 3 --bots custom_bots:MyBot`. Multiple implementations
+Run it with `python3 src/harness.py 3 --bots custom_bots:MyBot`. Multiple implementations
 can be selected independently, such as
 `--bots custom_bots:MyBot custom_bots:SmallBidBot custom_bots:MyBot`.
 Explicit imports make each public bot name easy to find. Keep definitions in their
-own modules; importing them into `custom_bots.py` makes them available to the CLI.
+own modules; importing them into `src/custom_bots.py` makes them available to the CLI.
 Workers still import each class from its original `bot_definitions` module, which
 also allows checkpoint recovery without any special registration code.
 
@@ -151,6 +152,11 @@ A bot using its own additional random generators should seed and store them itse
 
 ## Python API and reusing bots
 
+Runtime modules live in `src/`. When running your own API script from the project
+root, use `PYTHONPATH=src python3 your_script.py` so Python and spawned workers can
+find them. The experiment script and notebook add `src/` automatically, so their
+commands require no extra setup. No installation or virtual environment is needed.
+
 ```python
 from random import Random
 from bot_runner import BotRunner
@@ -188,8 +194,8 @@ For round-by-round inspection, use `with create_game(...) as game`, call
 `play_round(game)` while `game.auction_gems` is nonempty, and then `finish_game(game)`.
 Repeated finalization neither reveals cards twice nor repeats game-end callbacks.
 The main guard shown above is required for scripts that launch spawned workers.
-Define custom bot classes at module scope inside `bot_definitions/` and expose them
-through `custom_bots.py`. Avoid defining them inside functions or `__main__`.
+Define custom bot classes at module scope inside `src/bot_definitions/` and expose them
+through `src/custom_bots.py`. Avoid defining them inside functions or `__main__`.
 
 ## Experiment examples
 
@@ -211,21 +217,21 @@ experiment finishes, including when an exception interrupts it.
 
 ## Layout and checks
 
-- `constants.py`, `decks.py`, `lib.py`: setup rules, immutable catalogs/cards, typed decks.
-- `player.py`: mutable player state and bot decision validation.
-- `bots.py`: the developer-facing bot interface, snapshots, and result types.
-- `bot_info.py`: builds each player's information without inspecting hidden deck order.
-- `bot_runner.py`: worker lifecycle, transport, deadlines, and memory recovery.
-- `immutable.py`: a pickleable read-only mapping used by cards and snapshots.
-- `harness.py`: setup, round resolution, scoring, and CLI.
-- `bot_definitions/`: custom bot implementations, including `SmallBidBot` in
+- `src/constants.py`, `src/decks.py`, `src/lib.py`: setup rules, immutable catalogs/cards, typed decks.
+- `src/player.py`: mutable player state and bot decision validation.
+- `src/bots.py`: the developer-facing bot interface, snapshots, and result types.
+- `src/bot_info.py`: builds each player's information without inspecting hidden deck order.
+- `src/bot_runner.py`: worker lifecycle, transport, deadlines, and memory recovery.
+- `src/immutable.py`: a pickleable read-only mapping used by cards and snapshots.
+- `src/harness.py`: setup, round resolution, scoring, and CLI.
+- `src/bot_definitions/`: custom bot implementations, including `SmallBidBot` in
   `small_bid_bot.py`.
-- `custom_bots.py`: imports and exposes the bot classes available to the CLI.
+- `src/custom_bots.py`: imports and exposes the bot classes available to the CLI.
 
 Tests require no third-party packages. Ruff and mypy are optional development tools:
 
 ```sh
-python3 -B -m unittest discover -s tests -v
+PYTHONPATH=src python3 -B -m unittest discover -s tests -v
 ruff check .
 ruff format --check .
 mypy
