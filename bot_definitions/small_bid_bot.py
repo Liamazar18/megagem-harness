@@ -1,4 +1,4 @@
-"""A minimal stateful example; run with --bots example_bots:SmallBidBot."""
+"""A minimal stateful example; run with --bots custom_bots:SmallBidBot."""
 
 from bots import Bot, BotInfo, RoundResult
 

@@ -4,7 +4,7 @@ A standard-library-only simulator for 3–5 players, using Python 3.10 or newer.
 
 ```sh
 python3 harness.py 3 --seed 42 --bot-seed 7
-python3 harness.py 5 --chart C --bots example_bots:SmallBidBot
+python3 harness.py 5 --chart C --bots custom_bots:SmallBidBot
 python3 harness.py 3 --bot-timeout none
 ```
 
@@ -16,7 +16,18 @@ it defaults to one second per callback.
 
 ## Writing a bot
 
-Put a subclass in an importable module, such as `my_bot.py`:
+Put each custom bot implementation in the `bot_definitions/` package, then expose
+its class through `custom_bots.py`. Implementations can live in separate files:
+
+```text
+bot_definitions/
+    __init__.py
+    small_bid_bot.py
+    my_bot.py
+custom_bots.py
+```
+
+For example, define your subclass in `bot_definitions/my_bot.py`:
 
 ```python
 from collections.abc import Mapping
@@ -24,7 +35,7 @@ from bots import Bot, BotInfo, RoundResult
 
 
 class MyBot(Bot):
-    def __init__(self):
+    def __init__(self) -> None:
         self.games_played = 0
         self.rounds_seen = 0
 
@@ -42,7 +53,23 @@ class MyBot(Bot):
         self.rounds_seen += 1
 ```
 
-Run it with `python3 harness.py 3 --bots my_bot:MyBot`.
+Add its import and public name to `custom_bots.py` alongside the existing example:
+
+```python
+from bot_definitions.my_bot import MyBot
+from bot_definitions.small_bid_bot import SmallBidBot
+
+__all__ = ["MyBot", "SmallBidBot"]
+```
+
+Run it with `python3 harness.py 3 --bots custom_bots:MyBot`. Multiple implementations
+can be selected independently, such as
+`--bots custom_bots:MyBot custom_bots:SmallBidBot custom_bots:MyBot`.
+Explicit imports make each public bot name easy to find. Keep definitions in their
+own modules; importing them into `custom_bots.py` makes them available to the CLI.
+Workers still import each class from its original `bot_definitions` module, which
+also allows checkpoint recovery without any special registration code.
+
 All five callbacks are optional and synchronous:
 
 - `on_game_start() -> None`: called once before the first decision of each game.
@@ -127,7 +154,7 @@ A bot using its own additional random generators should seed and store them itse
 ```python
 from random import Random
 from bot_runner import BotRunner
-from example_bots import SmallBidBot
+from custom_bots import SmallBidBot
 from harness import play_game
 
 
@@ -161,7 +188,26 @@ For round-by-round inspection, use `with create_game(...) as game`, call
 `play_round(game)` while `game.auction_gems` is nonempty, and then `finish_game(game)`.
 Repeated finalization neither reveals cards twice nor repeats game-end callbacks.
 The main guard shown above is required for scripts that launch spawned workers.
-Bot classes belong in importable modules rather than inside functions or `__main__`.
+Define custom bot classes at module scope inside `bot_definitions/` and expose them
+through `custom_bots.py`. Avoid defining them inside functions or `__main__`.
+
+## Experiment examples
+
+The `experiments/` directory contains script and notebook examples that reuse bot runners across
+games, print each game's results, and then report total points and games won per
+entrant:
+
+- [Python script](experiments/sample_experiment.py): run
+  `python3 experiments/sample_experiment.py` from the project root.
+- [Notebook using existing bots](experiments/sample_experiment.ipynb): the same workflow
+  split into editable cells.
+
+Run notebook cells from top to bottom in a Python 3.10+ Jupyter environment. Each
+notebook finds the project whether its kernel starts in the root or `experiments/`.
+Edit the game count, seeds, timeout, and participant list to change the experiment.
+Labels identify individual entrants, seats stay fixed, and each tied winner
+receives one win. Runners retain memory between games and are closed when the
+experiment finishes, including when an exception interrupts it.
 
 ## Layout and checks
 
@@ -172,7 +218,9 @@ Bot classes belong in importable modules rather than inside functions or `__main
 - `bot_runner.py`: worker lifecycle, transport, deadlines, and memory recovery.
 - `immutable.py`: a pickleable read-only mapping used by cards and snapshots.
 - `harness.py`: setup, round resolution, scoring, and CLI.
-- `example_bots.py`: a minimal stateful example.
+- `bot_definitions/`: custom bot implementations, including `SmallBidBot` in
+  `small_bid_bot.py`.
+- `custom_bots.py`: imports and exposes the bot classes available to the CLI.
 
 Tests require no third-party packages. Ruff and mypy are optional development tools:
 
