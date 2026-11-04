@@ -4,7 +4,7 @@ from enum import Enum
 from types import MappingProxyType
 
 
-# The different types of gem cards (5 total, 1 wild-card value for missions)
+# Five physical gem types and one sentinel for unspecified mission gems.
 class GemType(Enum):
     BLUE_CIRCLE = 0
     GREEN_OVAL = 1
@@ -14,26 +14,23 @@ class GemType(Enum):
     WILD_CARD = 5  # A mission requirement for unspecified colors, not a physical card.
 
 
-# The different types of auction cards
-
-# Auction => Auction for 1 or 2 gems
-# Invest => Auction for an investment of known coin return
-# Loan => Auction for an immediate loan of coins to bid with
+# Auction types: treasure awards one or two gems; investments return the bid
+# plus a fixed bonus at game end; loans provide coins that must be repaid.
 class AuctionType(Enum):
     AUCTION = 0
     INVEST = 1
     LOAN = 2
 
 
-# Requirements for mission cards with wild-card gems
-# The wild-card gems must either be all the same, all different, or pairs of identical gems
+# Color constraints for unspecified mission gems: matching colors, distinct
+# colors, or pairs of matching colors.
 class WildCardRequirement(Enum):
     SAME = 0
     DIFFERENT = 1
     PAIRS = 2
 
 
-# A utility tuple of all non-wild-card gems. Can be useful as an iterable for for-loops
+# Physical gem types in the order used by catalogs and gem-count operations.
 STANDARD_GEMS = (
     GemType.BLUE_CIRCLE,
     GemType.GREEN_OVAL,
@@ -42,9 +39,8 @@ STANDARD_GEMS = (
     GemType.PINK_PENTAGON,
 )
 
-# MappingProxyType creates a read-only *view* of the dictionary.
-# Does not create a copy of the dictionary, like FrozenMap, but this 
-# is unimportant, since the original dictionaries will not change
+# MappingProxyType creates a read-only view, whereas FrozenMap copies entries.
+# These inline dictionaries have no separate mutable aliases.
 
 CARDS_PER_PLAYER = MappingProxyType({3: 5, 4: 4, 5: 3})
 COINS_PER_PLAYER = MappingProxyType({3: 35, 4: 25, 5: 20})

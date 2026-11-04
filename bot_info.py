@@ -13,8 +13,7 @@ if TYPE_CHECKING:
     from harness import GameState
 
 
-# Returns a PlayerInfo object with all information about a player that has been made public
-# Notably, does not include the hidden_gem_hand, as this is private information for a player
+# Return public player information, including hand size but not hidden gems.
 def _public_player(player: Player) -> PlayerInfo:
     return PlayerInfo(
         id=player.id,
@@ -28,14 +27,12 @@ def _public_player(player: Player) -> PlayerInfo:
     )
 
 
-# Creates a BotInfo object based on the game state, given the player that the bot acts for
-# The bot receives the game state/public information for all players, plut the private information
-# for the player that it represents (hidden gem hand)
+# Build a snapshot containing public information and this player's hidden hand.
+# The bot receives no live GameState, Player, or game random generator.
 def build_bot_info(game: "GameState", player: Player) -> BotInfo:
-    # Publicly available information about the player the bot represents
+    # Collect the public information for this player.
     public = _public_player(player)
-    # Combines public information with the hidden gem hand to create the information
-    # about the player known only by its bot
+    # Add this player's private hand to its public information.
     self_player = SelfInfo(
         id=public.id,
         coins=public.coins,
@@ -47,19 +44,19 @@ def build_bot_info(game: "GameState", player: Player) -> BotInfo:
         invested_coins=public.invested_coins,
         hidden_gems=tuple(player.hidden_gem_hand),
     )
-    # Calculates the number of gem cards that have not been revealed to this player,
-    # meaning that they either have yet to be revealed in auction, or are one of the
-    # hidden gems of another player 
+    # Infer unknown gem counts from the catalog and this player's observations.
+    # These gems are in opponents' hidden hands or the hidden draw pile; their
+    # actual locations are not exposed.
     unknown = Counter(GEM_CARDS)
     unknown.subtract(game.value_display)
     unknown.subtract(player.hidden_gem_hand)
     unknown.subtract(game.auction_gems)
     for other in game.players:
         unknown.subtract(other.gem_collection)
-    # Calculates which auction cards have yet to appear
+    # Infer undrawn auction-card counts from the public auction history.
     auctions = Counter(AUCTION_CARDS)
     auctions.subtract(game.auction_history)
-    # Combines all information into a BotInfo object, to be sent to the bot
+    # Combine these observations into the snapshot sent to the bot.
     return BotInfo(
         self_player=self_player,
         other_players=tuple(_public_player(p) for p in game.players if p is not player),
@@ -75,5 +72,6 @@ def build_bot_info(game: "GameState", player: Player) -> BotInfo:
         value_chart=game.value_chart,
         available_missions=tuple(game.available_missions),
         auction_deck_count=len(game.auction_deck),
-        auction_cards_remaining=FrozenMap(+auctions), # Only includes auction cards with a positive count remaining
+        # Include only auction cards with positive remaining counts.
+        auction_cards_remaining=FrozenMap(+auctions),
     )

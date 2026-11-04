@@ -24,7 +24,7 @@ from typing import Any
 
 from bots import Bot
 
-# Creates a logger for bot_runner.py
+# Create the module logger for worker errors and timeouts.
 logger = logging.getLogger(__name__)
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 CALLBACKS = frozenset(
@@ -32,12 +32,12 @@ CALLBACKS = frozenset(
 )
 
 
-# Based on the timeout, returns time as float by which the bot must complete
+# Return a monotonic deadline, or None when timeouts are disabled.
 def _deadline(timeout: float | None) -> float | None:
     return None if timeout is None else time.monotonic() + timeout
 
 
-# Sets a timeout on the bot's channel if applicable
+# Limit each socket operation to the remaining time budget.
 def _set_timeout(channel: socket.socket, deadline: float | None) -> None:
     if deadline is None:
         channel.settimeout(None)
@@ -48,7 +48,7 @@ def _set_timeout(channel: socket.socket, deadline: float | None) -> None:
         channel.settimeout(remaining)
 
 
-# Sends message to a bot worker and enforces a timeout as necessary
+# Send a length-prefixed JSON message within the remaining time budget.
 def _send(
     channel: socket.socket, message: dict[str, Any], deadline: float | None
 ) -> None:
@@ -56,11 +56,11 @@ def _send(
     if len(payload) > MAX_MESSAGE_BYTES:
         raise ValueError("Bot message or checkpoint exceeds the 16 MiB limit")
     _set_timeout(channel, deadline)
-    # Continues sending data until all data is sent or error occurs
+    # Send the complete frame, or raise if the connection fails or times out.
     channel.sendall(struct.pack("!I", len(payload)) + payload)
 
 
-# Wait for a message from the bot of defined size, with a timeout
+# Read exactly size bytes without resetting the overall deadline.
 def _read_exact(channel: socket.socket, size: int, deadline: float | None) -> bytes:
     chunks = bytearray()
     while len(chunks) < size:
@@ -72,92 +72,94 @@ def _read_exact(channel: socket.socket, size: int, deadline: float | None) -> by
     return bytes(chunks)
 
 
-# Reads data from the bot, first getting the size as a 4-byte integer, then getting the rest of the json data
+# Read the four-byte message length, then decode the JSON payload.
 def _receive(channel: socket.socket, deadline: float | None) -> dict[str, Any]:
-    # Gets the size of the message as the first four bytes
+    # Read the message length from the four-byte header.
     size = struct.unpack("!I", _read_exact(channel, 4, deadline))[0]
     if size > MAX_MESSAGE_BYTES:
         raise ValueError("Bot message or checkpoint exceeds the 16 MiB limit")
-    # Waits for the rest of the message
+    # Read and decode the complete payload.
     message = json.loads(_read_exact(channel, size, deadline))
     if not isinstance(message, dict):
         raise ValueError("Expected a bot message object")
     return message
 
 
-# Base64 encodes a pickled python object
+# Pickle a Python object and encode the bytes as Base64 text.
 def _encode(value: object) -> str:
     return base64.b64encode(pickle.dumps(value)).decode("ascii")
 
 
-# Base64 decodes a pickled python object and returns it as an object
+# Decode Base64 text and unpickle the resulting bytes inside a worker.
 def _decode(value: str) -> Any:
     # Called only inside workers, never on bot-produced data in the game process.
     return pickle.loads(base64.b64decode(value))
 
 
-# Encodes the bot's pickled state and the current internal state of the pseudo-random number generator
+# Save bot memory and the worker's private random-module state.
 def _checkpoint(bot: Bot) -> str:
     return _encode((bot.save_state(), random.getstate()))
 
 
-#
+# Run the bot callbacks in a separate process and return completed checkpoints.
 def _worker(
-    channel: socket.socket, # Channel of communication with the main process (harness)
-    module: str, # Module that the worker bot is from
-    qualname: str, # The dotted path of the bot class
-    checkpoint: str | None, # Saved checkpoint of the bot, if it exists
-    seed: int | None, # Random seed of the worker
-    timeout: float | None, # Timeout in seconds 
+    channel: socket.socket,  # Worker endpoint of the connection to the parent.
+    module: str,  # Importable module containing the bot class.
+    qualname: str,  # Qualified class name within the module.
+    checkpoint: str | None,  # Last completed checkpoint, if available.
+    seed: int | None,  # Independent seed for the worker's random module.
+    timeout: float | None,  # Callback allowance in seconds; None disables the limit.
 ) -> None:
     try:
         # multiprocessing inherits argv; bot callbacks do not need host CLI seeds.
         sys.argv = ["megagem-bot"]
-        # Imports the python module that the worker bot is from
+        # Import the module containing the bot class.
         bot_class: Any = importlib.import_module(module)
-        # Get the class form the dotted path (qualname) and module
+        # Resolve the class through its qualified name.
         for part in qualname.split("."):
             bot_class = getattr(bot_class, part)
-        # Make sure that the bot class inherits from Bot
+        # Verify that the resolved class inherits from Bot.
         if not isinstance(bot_class, type) or not issubclass(bot_class, Bot):
             raise TypeError("Bot class must inherit from Bot")
-        # Sets the random seed of the worker
+        # Seed the worker's private random module.
         random.seed(seed)
         if checkpoint is None:
-            # Instantiate a fresh bot if there is no checkpoint
+            # Construct a fresh bot when no checkpoint exists.
             bot = bot_class()
         else:
-            # Otherwise, decode the checkpoint and load it into the bot object/random module
-            bot = bot_class.__new__(bot_class) # Foregoes calling __init__()
+            # Restore bot memory and private random state from the checkpoint.
+            # Allocate the instance without calling __init__.
+            bot = bot_class.__new__(bot_class)
             state, rng_state = _decode(checkpoint)
             bot.load_state(state)
             random.setstate(rng_state)
-        # Sets the timeout of the bot
+        # Expose the callback allowance; the parent enforces the timeout.
         bot.timeout_seconds = timeout
-        # Notifies the caller that the worker has been created correctly and sends its checkpoint
+        # Confirm startup and send an initial checkpoint to the parent.
         _send(channel, {"ok": True, "checkpoint": _checkpoint(bot)}, None)
         while True:
-            # Wait for a request on the channel
+            # Wait for the next callback request.
             request = _receive(channel, None)
             method = request["method"]
-            # Check if a known method is requested form the bot
+            # Reject requests for methods outside the callback interface.
             if method not in CALLBACKS:
                 raise ValueError("Unknown bot callback")
             try:
                 args = _decode(request["args"])
-                # Calls the defined method with defined arguments on the bot
+                # Invoke the requested callback with the decoded arguments.
                 result = getattr(bot, method)(*args)
-                # Never serialize arbitrary return objects in the parent process.
-                # Bot methods should only ever return an int or None
+                # Forward only integer decisions or None as JSON values.
+                # Never send arbitrary return objects for the parent to unpickle.
                 value = result if type(result) is int else None
-                # Send the result and bot checkpoint. Checkpoint will never be unpickled in the parent process
+                # Send the result and checkpoint; the parent keeps the checkpoint
+                # opaque.
                 _send(
                     channel,
                     {"ok": True, "value": value, "checkpoint": _checkpoint(bot)},
                     None,
                 )
             except Exception as exc:
-                # Handle and forward error
+                # Report the error to the parent.
                 _send(
                     channel,
                     {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
@@ -166,18 +168,17 @@ def _worker(
     except (EOFError, OSError):
         pass
     except Exception as exc:
-        # Handle and forward error
+        # Report the error to the parent.
         try:
             _send(channel, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, None)
         except (OSError, ValueError):
             pass
     finally:
-        # Close the socket with the parent
+        # Close the worker's socket when this function exits.
         channel.close()
 
 
-# Wrapper around a bot that is able to start it as a child process
-# and communicate functions to it/receive return values
+# Manage a bot worker, invoke callbacks, and retain completed checkpoints.
 class BotRunner:
     """Own one bot's worker and memory; can be reused across multiple games.
 
@@ -187,12 +188,12 @@ class BotRunner:
 
     def __init__(
         self,
-        bot_class: type[Bot] = Bot, # Expects a Bot class/subclass, not object
+        bot_class: type[Bot] = Bot,  # An importable Bot subclass, not a bot instance.
         *,
         timeout: float | None = 1.0,
         seed: int | None = None,
     ) -> None:
-        # Checks on received arguments
+        # Validate the bot class and timeout configuration.
         if not issubclass(bot_class, Bot):
             raise TypeError("Bot class must inherit from Bot")
         if "<locals>" in bot_class.__qualname__ or bot_class.__module__ == "__main__":
@@ -202,20 +203,19 @@ class BotRunner:
         self.bot_class = bot_class
         self.timeout = timeout
         self.seed = seed
-        # Temporary label for the bot, to be updated with player number from the Player class 
+        # Player replaces this label with one that includes the player ID.
         self.label = bot_class.__name__
         self.last_error: str | None = None
         self._checkpoint: str | None = None
         self._process: BaseProcess | None = None
         self._channel: socket.socket | None = None
 
-    # Starts the bot running in a child process with a socket between them
+    # Start a worker process and establish its connection to the parent.
     def _start(self) -> None:
-        # Creates a scoket pair that can send/receive data from each other
+        # Create connected parent and worker socket endpoints.
         parent, child = socket.socketpair()
-        # Creates the worker function in a separate process object, inheriting the child end of the
-        # socket, as well as the necessary information to run the bot
-        # Uses "spawn" to make sure to start a fresh Python interpreter. Does NOT fork
+        # Spawn a fresh interpreter and pass it the worker socket and startup
+        # data, without copying the parent's live game memory through fork.
         process = multiprocessing.get_context("spawn").Process(
             target=_worker,
             args=(
@@ -226,96 +226,96 @@ class BotRunner:
                 self.seed,
                 self.timeout,
             ),
-            daemon=True, # Daemon process, automatically terminates when the parent process exits
+            daemon=True,  # Terminate this worker during normal parent shutdown.
         )
         self._process, self._channel = process, parent
         try:
-            # Starts the child process, actually creating it
+            # Launch the worker process.
             process.start()
         finally:
-            # Closes the socket
+            # Close the parent's copy of the worker endpoint.
             child.close()
-        # Waits for the startup "ok" from the child, with timeout at most 5 seconds
+        # Allow at least five seconds for startup, unless timeouts are disabled.
         startup_timeout = None if self.timeout is None else max(5.0, self.timeout)
         reply = _receive(parent, _deadline(startup_timeout))
-        # Process reply
+        # Validate the reply and retain its checkpoint.
         self._accept(reply)
 
-    # Method to process replies of the bot, saving the checkpoint and possibly forwarding a return value
+    # Validate a reply, retain its checkpoint, and return the decision if present.
     def _accept(self, reply: dict[str, Any]) -> int | None:
-        # Indicate if the bot worker has failed
+        # Raise if the worker reported a failure.
         if reply.get("ok") is not True:
             raise RuntimeError(str(reply.get("error", "Bot worker failed")))
         checkpoint = reply.get("checkpoint")
         value = reply.get("value")
-        # Ensure that the value and checkpoint are valid
+        # Validate response types without decoding the checkpoint.
         if not isinstance(checkpoint, str) or (
             value is not None and type(value) is not int
         ):
             raise ValueError("Malformed bot response")
-        # Save the checkpoint
+        # Retain the last completed checkpoint.
         self._checkpoint = checkpoint
-        # Forward the return value (or None)
+        # Return the integer value or None; notification callers ignore it.
         return value
 
-    # Calls a method on the bot worker with provided arguments
+    # Invoke a bot callback with a bounded wait and checkpoint recovery.
     def call(self, method: str, *args: object) -> int | None:
-        # Validates the method name
+        # Validate the callback name.
         if method not in CALLBACKS:
             raise ValueError(f"Unknown bot callback: {method}")
         self.last_error = None
         try:
-            # Starts if the bot worker process has not already been started
+            # Start a fresh worker or restore the last completed checkpoint.
             if self._channel is None:
                 self._start()
             assert self._channel is not None
-            # Gets the timeout deadline
+            # Set the overall callback deadline.
             deadline = _deadline(self.timeout)
-            # Sends a method to the bot worker
+            # Send the callback name and serialized arguments.
             _send(self._channel, {"method": method, "args": _encode(args)}, deadline)
-            # Receive a response from the bot, with a timeout
+            # Wait for a response within the remaining callback budget.
             reply = _receive(self._channel, deadline)
-            # Raise if there was a timeout
+            # Reject a response if decoding completed after the deadline.
             if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError("Bot call exceeded its time budget")
-            # Process reply
+            # Validate the reply and retain its checkpoint.
             return self._accept(reply)
         except Exception as exc:
-            # Log errors, including timeout
+            # Record and log failures, including timeouts.
             self.last_error = f"{method}: {type(exc).__name__}: {exc}"
             logger.warning("%s: %s", self.label, self.last_error)
-            # Stop the worker bot
+            # Stop the worker while preserving the previous completed checkpoint.
             self.close()
             return None
 
-    # Stops the worker, while retaining its checkpoint
+    # Stop the worker while retaining its checkpoint.
     def close(self) -> None:
         """Stop the worker, retaining its checkpoint for future calls/games."""
-        # Close the socket channel as necessary
+        # Close the parent's socket endpoint if present.
         if self._channel is not None:
             self._channel.close()
             self._channel = None
-        # Temporariliy save and reset self._process
+        # Detach the process handle before cleaning up the worker.
         process, self._process = self._process, None
         if process is not None and process.pid is not None:
-            # Terminate the process as necessary
+            # Request termination if the worker is still running.
             if process.is_alive():
                 process.terminate()
-            # Give time for a graceful termination
+            # Wait briefly for the process to exit after the termination request.
             process.join(timeout=0.2)
-            # Kill the process as necessary if still alive
+            # Force termination if the worker has not exited.
             if process.is_alive():
                 process.kill()
                 process.join(timeout=0.2)
-            # Release Process object resources
+            # Release the process handle after the worker has exited.
             if not process.is_alive():
                 process.close()
 
-    # Executes when entering a "with" block
+    # Return this instance when entering a with block.
     def __enter__(self) -> BotRunner:
         return self
 
-    # Executes when leaving a "with" block, makes sure to cleanup the child process
+    # Stop the worker when leaving a with block.
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
@@ -324,7 +324,7 @@ class BotRunner:
     ) -> None:
         self.close()
 
-    # Executes when the object is about to be destroyed, makes sure to cleanup the child process
+    # Attempt worker cleanup when the runner is garbage-collected.
     def __del__(self) -> None:
         try:
             self.close()
